@@ -40,6 +40,7 @@
 
 #define DST(bits, num)	(scale2x_uint ## bits *)dst ## num
 #define SRC(bits, num)	(const scale2x_uint ## bits *)src ## num
+#include "graphics/scaler/scale6x.h"
 
 /**
  * Apply the Scale2x effect on a group of rows. Used internally.
@@ -80,6 +81,15 @@ static inline void stage_scale4x(void* dst0, void* dst1, void* dst2, void* dst3,
 	stage_scale2x(dst0, dst1, src0, src1, src2, pixel, 2 * pixel_per_row);
 	stage_scale2x(dst2, dst3, src1, src2, src3, pixel, 2 * pixel_per_row);
 }
+
+static inline void stage_scale6x(void* dst0, void* dst1, void* dst2, void* dst3, void* dst4, void* dst5, const void* src0, const void* src1, const void* src2, unsigned pixel, unsigned pixel_per_row) {
+	switch (pixel) {
+	case 1 : scale6x_8_def(DST(8,0), DST(8,1), DST(8,2), DST(8,3), DST(8,4), DST(8,5), SRC(8,0), SRC(8,1), SRC(8,2), pixel_per_row); break;
+	case 2 : scale6x_16_def(DST(16,0), DST(16,1), DST(16,2), DST(16,3), DST(16,4), DST(16,5), SRC(16,0), SRC(16,1), SRC(16,2), pixel_per_row); break;
+	case 4 : scale6x_32_def(DST(32,0), DST(32,1), DST(32,2), DST(32,3), DST(32,4), DST(32,5), SRC(32,0), SRC(32,1), SRC(32,2), pixel_per_row); break;
+	}
+}
+
 
 #define SCDST(i) (dst+(i)*dst_slice)
 #define SCSRC(i) (src+(i)*src_slice)
@@ -182,8 +192,6 @@ static void scale4x_buf(void* void_dst, unsigned dst_slice, void* void_mid, unsi
 	unsigned count;
 	unsigned char* mid[6];
 
-	assert(height >= 4);
-
 	count = height;
 
 	/* set the 6 buffer pointers */
@@ -194,11 +202,16 @@ static void scale4x_buf(void* void_dst, unsigned dst_slice, void* void_mid, unsi
 	mid[4] = mid[3] + mid_slice;
 	mid[5] = mid[4] + mid_slice;
 
+	stage_scale2x(SCMID(0), SCMID(1), SCSRC(0) - pixel, SCSRC(1) - pixel, SCSRC(2) - pixel, pixel, width + 2);
+	stage_scale2x(SCMID(2), SCMID(3), SCSRC(1) - pixel, SCSRC(2) - pixel, SCSRC(3) - pixel, pixel, width + 2);
+	
 	while (count) {
 		unsigned char* tmp;
 
 		stage_scale2x(SCMID(4), SCMID(5), SCSRC(2), SCSRC(3), SCSRC(4), pixel, width);
 		stage_scale4x(SCDST(0), SCDST(1), SCDST(2), SCDST(3), SCMID(1), SCMID(2), SCMID(3), SCMID(4), pixel, width);
+		stage_scale2x(SCMID(4), SCMID(5), SCSRC(2) - pixel, SCSRC(3) - pixel, SCSRC(4) - pixel, pixel, width  +2);
+		stage_scale4x(SCDST(0), SCDST(1), SCDST(2), SCDST(3), SCMID(1) + 2 * pixel, SCMID(2) + 2 * pixel, SCMID(3) + 2 * pixel, SCMID(4) + 2 * pixel, pixel, width);
 
 		dst = SCDST(4);
 		src = SCSRC(1);
@@ -240,7 +253,7 @@ static void scale4x(void* void_dst, unsigned dst_slice, const void* void_src, un
 	unsigned mid_slice;
 	void* mid;
 
-	mid_slice = 2 * pixel * width; /* required space for 1 row buffer */
+	mid_slice = 2 * pixel * (width + 2); /* required space for 1 row buffer */
 
 	mid_slice = (mid_slice + 0x7) & ~0x7; /* align to 8 bytes */
 
@@ -262,6 +275,25 @@ static void scale4x(void* void_dst, unsigned dst_slice, const void* void_src, un
 #endif
 }
 
+static void scale6x(void* void_dst, unsigned dst_slice, const void* void_src, unsigned src_slice, unsigned pixel, unsigned width, unsigned height) {
+	unsigned char* dst = (unsigned char*)void_dst;
+	const unsigned char* src = (const unsigned char*)void_src;
+	unsigned count;
+
+	assert(height >= 2);
+
+	count = height;
+
+	while (count) {
+		stage_scale6x(SCDST(0), SCDST(1), SCDST(2), SCDST(3), SCDST(4), SCDST(5), SCSRC(0), SCSRC(1), SCSRC(2), pixel, width);
+
+		dst = SCDST(6);
+		src = SCSRC(1);
+
+		--count;
+	}
+}
+
 /**
  * Check if the scale implementation is applicable at the given arguments.
  * @param scale Scale factor. 2, 3 or 4.
@@ -274,10 +306,10 @@ static void scale4x(void* void_dst, unsigned dst_slice, const void* void_src, un
  */
 int scale_precondition(unsigned scale, unsigned pixel, unsigned width, unsigned height)
 {
-	if (scale != 2 && scale != 3 && scale != 4)
+	if (scale != 2 && scale != 3 && scale != 4 && scale != 6)
 		return -1;
 
-	if (pixel != 1 && pixel != 2 && pixel != 4)
+	if (pixel != 1 && pixel != 2 && pixel != 4 && scale != 6)
 		return -1;
 
 	switch (scale) {
@@ -290,7 +322,11 @@ int scale_precondition(unsigned scale, unsigned pixel, unsigned width, unsigned 
 		if (height < 4)
 			return -1;
 		break;
-	}
+	case 6 :
+		if (height < 6)
+			return -1;
+		break;
+ 	}
 
 #if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
 	switch (scale) {
@@ -302,6 +338,7 @@ int scale_precondition(unsigned scale, unsigned pixel, unsigned width, unsigned 
 			return -1;
 		break;
 	case 3 :
+	case 6 :	
 		if (width < 2)
 			return -1;
 		break;
@@ -338,5 +375,8 @@ void scale(unsigned scale, void* void_dst, unsigned dst_slice, const void* void_
 	case 4 :
 		scale4x(void_dst, dst_slice, void_src, src_slice, pixel, width, height);
 		break;
+	case 6 :
+		scale6x(void_dst, dst_slice, void_src, src_slice, pixel, width, height);
+		break;		
 	}
 }
